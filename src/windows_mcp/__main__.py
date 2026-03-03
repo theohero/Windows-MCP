@@ -50,16 +50,21 @@ async def lifespan(app: FastMCP):
     """Runs initialization code before the server starts and cleanup code after it shuts down."""
     global desktop, watchdog, analytics,screen_size
 
+    from windows_mcp.tree.config import WATCHDOG_ENABLED
+
     # Initialize components here instead of at module level
     if os.getenv("ANONYMIZED_TELEMETRY", "true").lower() != "false":
         analytics = PostHogAnalytics()
     desktop = Desktop()
-    watchdog = WatchDog()
     screen_size = desktop.get_screen_size()
-    watchdog.set_focus_callback(desktop.tree._on_focus_change)
+
+    if WATCHDOG_ENABLED:
+        watchdog = WatchDog()
+        watchdog.set_focus_callback(desktop.tree._on_focus_change)
 
     try:
-        watchdog.start()
+        if watchdog:
+            watchdog.start()
         await asyncio.sleep(1)  # Simulate startup latency
         yield
     finally:
@@ -178,7 +183,7 @@ def file_system_tool(
 
 @mcp.tool(
     name='Snapshot',
-    description='Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot. Set use_dom=True for browser content to get web page elements instead of browser UI. Always call this first to understand the current desktop state before taking actions.',
+    description='Captures desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot. Set use_dom=True for browser content to get web page elements instead of browser UI. Set window_title to scope capture to a specific window (partial match, case-insensitive) for much faster results. Always call this first to understand the current desktop state before taking actions.',
     annotations=ToolAnnotations(
         title="Snapshot",
         readOnlyHint=True,
@@ -188,7 +193,7 @@ def file_system_tool(
     ),
 )
 @with_analytics(analytics, "State-Tool")
-def state_tool(use_vision:bool|str=False,use_dom:bool|str=False, ctx: Context = None):
+def state_tool(use_vision:bool|str=False,use_dom:bool|str=False,window_title:str|None=None, ctx: Context = None):
     try:
         use_vision = use_vision is True or (isinstance(use_vision, str) and use_vision.lower() == 'true')
         use_dom = use_dom is True or (isinstance(use_dom, str) and use_dom.lower() == 'true')
@@ -198,10 +203,26 @@ def state_tool(use_vision:bool|str=False,use_dom:bool|str=False, ctx: Context = 
         scale_height = MAX_IMAGE_HEIGHT / screen_size.height if screen_size.height > MAX_IMAGE_HEIGHT else 1.0
         scale = min(scale_width, scale_height)
         
-        desktop_state=desktop.get_state(use_vision=use_vision,use_dom=use_dom,as_bytes=False,scale=scale)
+        desktop_state=desktop.get_state(use_vision=use_vision,use_dom=use_dom,as_bytes=False,scale=scale,window_title=window_title)
+        
+        from windows_mcp.tree.config import MAX_ELEMENTS
+        
+        # Truncate interactive elements if exceeding limit
+        total_interactive = len(desktop_state.tree_state.interactive_nodes)
+        total_scrollable = len(desktop_state.tree_state.scrollable_nodes)
+        if total_interactive > MAX_ELEMENTS:
+            desktop_state.tree_state.interactive_nodes = desktop_state.tree_state.interactive_nodes[:MAX_ELEMENTS]
+        if total_scrollable > MAX_ELEMENTS:
+            desktop_state.tree_state.scrollable_nodes = desktop_state.tree_state.scrollable_nodes[:MAX_ELEMENTS]
         
         interactive_elements=desktop_state.tree_state.interactive_elements_to_string()
         scrollable_elements=desktop_state.tree_state.scrollable_elements_to_string()
+        
+        # Add truncation notice
+        if total_interactive > MAX_ELEMENTS:
+            interactive_elements += f"\n... ({total_interactive - MAX_ELEMENTS} more elements truncated. Use window_title to scope.)"
+        if total_scrollable > MAX_ELEMENTS:
+            scrollable_elements += f"\n... ({total_scrollable - MAX_ELEMENTS} more elements truncated. Use window_title to scope.)"
         windows=desktop_state.windows_to_string()
         active_window=desktop_state.active_window_to_string()
         active_desktop=desktop_state.active_desktop_to_string()

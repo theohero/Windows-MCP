@@ -78,6 +78,7 @@ class Desktop:
         use_dom: bool | str = False,
         as_bytes: bool | str = False,
         scale: float = 1.0,
+        window_title: str | None = None,
     ) -> DesktopState:
         use_annotation = use_annotation is True or (
             isinstance(use_annotation, str) and use_annotation.lower() == "true"
@@ -112,18 +113,65 @@ class Desktop:
         logger.debug(f"Windows: {windows}")
 
         # Preparing handles for Tree
-        other_windows_handles = list(controls_handles - windows_handles)
-
-        tree_state = self.tree.get_state(
-            active_window_handle, other_windows_handles, use_dom=use_dom
-        )
+        # When window_title is specified, only walk matching window(s) for performance
+        if window_title:
+            title_lower = window_title.lower()
+            matching_handles = set()
+            # Check active window first
+            if active_window and title_lower in active_window.name.lower():
+                matching_handles.add(active_window_handle)
+            # Check other windows
+            for w in windows:
+                if title_lower in w.name.lower():
+                    matching_handles.add(w.handle)
+            if matching_handles:
+                # Only walk matched windows — much faster than walking everything
+                scoped_active = active_window_handle if active_window_handle in matching_handles else None
+                scoped_others = list(matching_handles - {scoped_active} if scoped_active else matching_handles)
+                tree_state = self.tree.get_state(
+                    scoped_active, scoped_others, use_dom=use_dom
+                )
+            else:
+                # No match found — fall back to active window only
+                tree_state = self.tree.get_state(
+                    active_window_handle, [], use_dom=use_dom
+                )
+        else:
+            other_windows_handles = list(controls_handles - windows_handles)
+            tree_state = self.tree.get_state(
+                active_window_handle, other_windows_handles, use_dom=use_dom
+            )
 
         if use_vision:
             if use_annotation:
                 nodes = tree_state.interactive_nodes
                 screenshot = self.get_annotated_screenshot(nodes=nodes)
             else:
-                screenshot = self.get_screenshot()
+                # Scoped screenshot: capture only matched window region when window_title is set
+                if window_title:
+                    target_window = None
+                    if active_window and window_title.lower() in active_window.name.lower():
+                        target_window = active_window
+                    else:
+                        for w in windows:
+                            if window_title.lower() in w.name.lower():
+                                target_window = w
+                                break
+                    if target_window and target_window.bounding_box:
+                        box = target_window.bounding_box
+                        screenshot = self.get_screenshot()
+                        left_offset, top_offset, _, _ = uia.GetVirtualScreenRect()
+                        crop_box = (
+                            box.left - left_offset,
+                            box.top - top_offset,
+                            box.right - left_offset,
+                            box.bottom - top_offset,
+                        )
+                        screenshot = screenshot.crop(crop_box)
+                    else:
+                        screenshot = self.get_screenshot()
+                else:
+                    screenshot = self.get_screenshot()
 
             if scale != 1.0:
                 screenshot = screenshot.resize(
@@ -913,8 +961,8 @@ class Desktop:
                 font=font,
             )
 
-        # Draw annotations in parallel
-        with ThreadPoolExecutor() as executor:
+        # Draw annotations in parallel (capped at 2 threads — CPU-bound work)
+        with ThreadPoolExecutor(max_workers=2) as executor:
             executor.map(draw_annotation, range(len(nodes)), nodes)
         return padded_screenshot
 

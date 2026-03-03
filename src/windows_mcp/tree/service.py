@@ -15,6 +15,9 @@ from windows_mcp.tree.config import (
     DEFAULT_ACTIONS,
     INTERACTIVE_ROLES,
     THREAD_MAX_RETRIES,
+    THREAD_MAX_WORKERS,
+    MAX_TREE_DEPTH,
+    MAX_ELEMENTS,
 )
 from windows_mcp.tree.views import (
     TreeElementNode,
@@ -149,7 +152,7 @@ class Tree:
                 pass
             task_inputs.append((handle, is_browser))
 
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=THREAD_MAX_WORKERS) as executor:
             retry_counts = {handle: 0 for handle in windows_handles}
             future_to_handle = {
                 executor.submit(self.get_nodes, handle, is_browser, use_dom): handle
@@ -323,7 +326,12 @@ class Tree:
         is_dialog: bool = False,
         element_cache_req: Any | None = None,
         children_cache_req: Any | None = None,
+        depth: int = 0,
+        max_depth: int = MAX_TREE_DEPTH,
     ):
+        # Depth limit to prevent runaway recursion on deep DOM trees
+        if depth >= max_depth:
+            return
         try:
             # Build cached control if caching is enabled
             if not hasattr(node, "_is_cached") and element_cache_req:
@@ -596,6 +604,8 @@ class Tree:
                         is_dialog=is_dialog,
                         element_cache_req=element_cache_req,
                         children_cache_req=children_cache_req,
+                        depth=depth + 1,
+                        max_depth=max_depth,
                     )
                 # Check if the child is a dialog
                 elif isinstance(child, WindowControl):
@@ -631,6 +641,8 @@ class Tree:
                         is_dialog=True,
                         element_cache_req=element_cache_req,
                         children_cache_req=children_cache_req,
+                        depth=depth + 1,
+                        max_depth=max_depth,
                     )
                 else:
                     # normal non-dialog children
@@ -647,6 +659,8 @@ class Tree:
                         is_dialog=is_dialog,
                         element_cache_req=element_cache_req,
                         children_cache_req=children_cache_req,
+                        depth=depth + 1,
+                        max_depth=max_depth,
                     )
         except Exception as e:
             logger.error(f"Error in tree_traversal: {e}", exc_info=True)
